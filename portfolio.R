@@ -32,11 +32,18 @@ PortfolioAbstract <-
 Portfolio <-
   R6Class("Portfolio",
           public = list(
-            shares     = NULL,
-            prices     = NULL,
-            mv         = NULL,
-            nav        = 0,
-            summary    = function() {},
+            shares = NULL,
+            prices = NULL,
+            mv     = NULL,
+            nav    = 0,
+            bm     = NULL,
+            summary = function() {
+              numNames <- nrow(self$shares)
+              paste0("Portfolio Summary\n",
+                     "=================\n\n",
+                     "Market Value : ", format(round(self$nav/10^6), big.mark = ","), "M",
+                     "# of Stocks : ", nrow(self$shares))
+            },
             initialize = function(shares = NULL, prices = NULL, mv = NULL, nav = 0, weights = NULL) {
                                         # Parameter checking
               if (!is.null(shares) && !is.null(prices)) {
