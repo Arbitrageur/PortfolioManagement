@@ -74,13 +74,21 @@ Portfolio <-
             },
             rebalance = function(target = NULL, contribution = 0, data = NULL) {
               # target must be of the class "Portfolio" or "PortfolioAbstract"
-              if (!is(target, "PortfolioAbstract")) {
+              if (is.null(target)) {
+                if (contribution > 0) {
+                  target <- self$clone()
+                } else {
+                  stop(simpleError("Specify the target portfolio or the amount of contribution."))
+                }
+              } else if (!is(target, "PortfolioAbstract")) {
                 stop(simpleError("Target must be a Portfolio."))
               }
 
-              prices <- rbind(target$prices, self$prices)
+              old.prices <- self$prices[!self$prices$id %in% target$prices$id, ]
+              prices <- rbind(old.prices, target$prices)
               if (!is.null(data) && all(c('id', 'price') %in% names(data))) {
-                prices <- rbind(prices, data[c('id', 'price')])
+                old.prices <- prices[!prices$id %in% data$id, ]
+                prices <- rbind(old.prices, data[c('id', 'price')])
               }
               missing.price <- target$weights$id[!all(target$weights$id %in% prices$id)]
               if (length(missing.price) > 0) {
@@ -154,7 +162,10 @@ Portfolio <-
               self$mv <- tmp[c('id', 'mv')]
               self$nav <- sum(self$mv$mv)
               tmp$weights <- tmp$mv / self$nav
-              super$initialize(tmp[c('id', 'weights')])
+              tmp$weights.mpfr <- formatMpfr(mpfr(tmp$mv, 1024) / mpfr(self$nav, 1024))
+              self$weights <- tmp[c('id', 'weights')]
+              self$weights.mpfr <- tmp[c('id', 'weights.mpfr')]
+              colnames(self$weights.mpfr) <- c('id', 'weights')
             }
           ),
           active = list(
