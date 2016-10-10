@@ -141,16 +141,24 @@ Portfolio <-
               private$calcWeights()
               invisible(self)
             },
-            applyTrades= function(trades) {
+            applyTrades= function(trades, amount = F) {
               # Checking the arguments
               if (!is.data.frame(trades)) {
-                stop(simpleError("Trades is not data.frame."))
+                stop(simpleError("Trades must be a dataframe."))
               }
-              if (!all(c("id", "trade") %in% names(trades))) {
+              if (!all(c("id", "trade", "price") %in% names(trades))) {
                 stop(simpleError("Trades must contain the columns of 'id' and 'trade'."))
               }
-              old.prices <- self$prices[!self$prices$id %in% trades$id, ]
-              new.prices <- rbind(old.prices, trades[c('id', 'price')])
+              old.prices <- self$prices[!self$prices$id %in% trades[!is.na(trades$price), ]$id, ]
+              new.prices <- rbind(old.prices, trades[!is.na(trades$price), c('id', 'price')])
+
+              if (amount) {
+                trades.shares <- merge(trades[c('id', 'trade')],
+                                       new.prices,
+                                       all.x = T)
+                trades.shares %<>% mutate(trade = round(trade / price))
+                trades <- trades.shares
+              }
 
               tmp <- merge(self$shares, trades[c('id', 'trade')], by='id', all=T)
               tmp <- merge(tmp, new.prices, by='id', all=T)
