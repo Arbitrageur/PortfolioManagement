@@ -1,13 +1,26 @@
 library(R6)
-library(dplyr)
 library(magrittr)
+library(dplyr)
+library(Rmpfr)
+
+as.data.frame.mpfr <- function(x, row.names = NULL, stringsAsFactors = F, ...) {
+  as.data.frame(formatMpfr(x), row.names = row.names, stringsAsFactors = F, ...)
+}
+
+can.be.number <- function(x) {
+  idx <- grep("^[0-9.]+(e[0-9-]+)?$", x)
+  ans <- logical(length(x))
+  ans[idx] <- T
+  return(ans)
+}
 
 PortfolioAbstract <-
   R6Class("PortfolioAbstract",
           public = list(
             cash = 0,
-            weights = NULL,
-            weights.mpfr = NULL,
+            data = NULL,
+            ## weights = NULL,
+            ## weights.mpfr = NULL,
             isValid = function() {
               sum(self$weights$weights) + self$cash == 1 &&
                 (!self$allow.cash && self$cash == 0)
@@ -17,73 +30,81 @@ PortfolioAbstract <-
                 stop(simpleError("Weights should be provided."))
               }
               names <- colnames(weights)
-              if (!all(c("id", "weights") %in% names)) {
-                stop(simpleError("The weights have to have 'id' and 'weights' fields."))
+              if (!all(c("id", "weight") %in% names)) {
+                stop(simpleError("The data must have 'id' and 'weight' fields."))
               }
-              weights <- weights[weights$weights > 0, ]
-              self$weights.mpfr <- self$weights <- weights[c('id', 'weights')]
-              self$weights.mpfr$weights <- format(self$weights.mpfr$weights)
+              stopifnot(sum(weights$weight) == 1)
+              ## weights <- weights[weights$weight > 0, ]
+              tryCatch({
+                weights$weight <- format(mpfr(weights$weight, 1024))
+              }, error = function(e) stop(e))
+              self$data <- weights[c('id', 'weight')]
             }
           ),
           private = list(
             allow.cash = F
+          ),
+          active = list(
+            weights = function(w) {
+              if (missing(w)) {
+                tmp <- data.frame(id     = self$data$id,
+                                  weight = as.numeric(mpfr(self$data$weight, 1024)))
+                return(tmp)
+              }
+              stopifnot(is.data.frame(w))
+              stopifnot(all(c('id', 'weight') %in% names(w)))
+              if (is.numeric(w$weight) && sum(w$weight) == 1) {
+                w$weight <- format(mpfr(w$weight, 1024))
+                self$data <- w
+              } else if (is.character(w$weight)) {
+                tryCatch({
+                  w$weight <- format(mpfr(w$weight, 1024))
+                  self$data <- w
+                }, error = function(e) stop(e))
+              }
+            }
           ))
 
 Portfolio <-
   R6Class("Portfolio",
           public = list(
-            shares = NULL,
-            prices = NULL,
-            mv     = NULL,
-            nav    = 0,
-            bm     = NULL,
+            data = NULL,
             summary = function() {
-              numNames <- nrow(self$shares)
+              numNames <- nrow(self$data)
               paste0("Portfolio Summary\n",
                      "=================\n\n",
-                     "Market Value : ", format(round(self$nav/10^6), big.mark = ","), "M",
+                     ## "Market Value : ", format(round(self$nav/10^6), big.mark = ","), "M",
                      "# of Stocks : ", nrow(self$shares))
             },
-            initialize = function(shares = NULL, prices = NULL, mv = NULL, nav = 0, weights = NULL) {
-                                        # Parameter checking
-              if (!is.null(shares) && !is.null(prices)) {
-                                        # Required columns check
-                if (!all(c('id', 'shares') %in% names(shares))) {
-                  stop(simpleError("The shares must have the columns of 'id' and 'shares'"))
-                }
-                if (!all(c('id', 'price') %in% names(prices))) {
-                  stop(simpleError("The prices must have the columns of 'id' and ''"))
-                }
-                missing.id <- shares$id[!shares$id %in% prices$id]
-                if (length(missing.id) > 0) {
-                  stop(simpleError(paste0("The prices for these ids are required.\n",
-                                          do.call(paste, as.list(c(missing.id, sep=","))))))
-                }
-                self$shares <- shares[c('id', 'shares')]
-                self$prices <- prices[c('id', 'price')]
-                private$calcWeights()
-              }
+            initialize = function(data) {
+              ## Parameter checking
+              stopifnot(!missing(data))
+              stopifnot(is.data.frame(data))
+              stopifnot('id' %in% names(data))
+              stopifnot(all(c('shares', 'price') %in% names(data)) ||
+                        all(c('mv', 'price') %in% names(data)))
+              stopifnot(!any(is.na(data)))
+
+              col <- c('id', 'shares', 'price', 'mv')
+              available.col <- col[col %in% names(data)]
+              self$data <- data[available.col]
+
+              private$calcWeights()
             },
             invest = function(contribution = 0) {
               if (contribution == 0) {
-                return(data.frame(id = character(0), trade = numeric(0)))
-              } else {
-                tmp <- merge(self$weights.mpfr, self$prices, by = 'id', all.x = T)
-                tmp <- merge(tmp, self$shares, by = 'id', all.x = T)
-                tmp.weights <- mpfr(tmp$weights, precBits = 1024)
-                tmp.mv <- tmp.weights * (self$nav + contribution)
-                tmp.shares <- tmp.mv / tmp$price
-                trades <- round(as.numeric(tmp.shares)) - tmp$shares
-                self$weights.mpfr <- data.frame(id      = tmp$id,
-                                                weights = formatMpfr(tmp.weights))
-                return(data.frame(id = tmp$id, trade = trades))
+                return(data.frame(id = character(0), trade = numeric(0), price = numeric(0)))
               }
+              tmp <- self$data %>%
+                mutate(trade = round(as.numeric(mpfr(weight, 1024) * contribution / price))) %>%
+                dplyr::select(id, trade, price)
+              return(tmp)
             },
             rebalance = function(target = NULL, contribution = 0, data = NULL) {
               # target must be of the class "Portfolio" or "PortfolioAbstract"
               if (is.null(target)) {
                 if (contribution > 0) {
-                  target <- self$clone()
+                  return(self$invest(contribution))
                 } else {
                   stop(simpleError("Specify the target portfolio or the amount of contribution."))
                 }
@@ -91,35 +112,23 @@ Portfolio <-
                 stop(simpleError("Target must be a Portfolio."))
               }
 
-              old.prices <- self$prices[!self$prices$id %in% target$prices$id, ]
-              prices <- rbind(old.prices, target$prices)
-              if (!is.null(data) && all(c('id', 'price') %in% names(data))) {
-                old.prices <- prices[!prices$id %in% data$id, ]
-                prices <- rbind(old.prices, data[c('id', 'price')])
+              total <- self$nav + contribution
+              if (is(target, "Portfolio")) {
+                t <- target$data[c('id', 'price', 'weight') %in% names(target$data)] %>%
+                  full_join(self$data[c('id', 'shares', 'price')], by='id') %>%
+                  mutate(price = ifelse(is.na(price.x), price.y, price.x)) %>%
+                  select(-price.x, -price.y) %>%
+                  mutate(trade = round(as.numeric(mpfr(weight, 1024) * total / price))) %>%
+                  dplyr::select(id, trade, price)
+                return(t)
+              } else {
+                t <- target$data[c('id', 'weight') %in% names(target$data)] %>%
+                  full_join(self$data[c('id', 'shares', 'price')], by='id') %>%
+                  mutate_each(funs(replace(., is.na(.), 0))) %>%
+                  mutate(trade = round(as.numeric(mpfr(weight, 1024) * total / price)) - shares) %>%
+                  dplyr::select(id, trade, price)
+                return(t)
               }
-              missing.price <- target$weights$id[!all(target$weights$id %in% prices$id)]
-              if (length(missing.price) > 0) {
-                errors <- paste0("The price must be provided for all ids.\n", "\tIDs : ",
-                                 do.call(paste, as.list(c(missing.price, sep=", "))))
-                stop(simpleError(errors))
-              }
-
-              tmp <- merge(target$weights.mpfr,
-                           prices,
-                           by = 'id', all.x = T)
-
-              tmp <- merge(tmp,
-                           self$shares,
-                           by = 'id', all = T)
-              tmp[is.na(tmp)] <- 0
-              tmp.weights <- mpfr(tmp$weights, precBits = 1024)
-              tmp.mv <- tmp.weights * (self$nav + contribution)
-              tmp.shares <- tmp.mv / tmp$price
-              tmp.shares[is.nan(tmp.shares)] <- 0
-              self$weights.mpfr <- data.frame(id      = tmp$id,
-                                              weights = formatMpfr(tmp.weights))
-              trades <- round(as.numeric(tmp.shares)) - tmp$shares
-              return(data.frame(id = tmp$id, trade = trades, price = tmp$price))
             },
             reevaluate = function(prices) {
               # Checking missing prices
@@ -129,15 +138,18 @@ Portfolio <-
               if (!all(c('id', 'price') %in% names(prices))) {
                 stop(simpleError("Price must contain the columns of 'id' and 'price'"))
               }
-              missing.price <- self$shares$id[!all(self$shares$id %in% prices$id)]
-              if (length(missing.price) > 0) {
-                errors <- paste0("The price must be provided for all ids.\n", "\tMissing IDs : ",
-                                 do.call(paste, as.list(c(missing.price, sep=", "))))
-                stop(simpleError(errors))
-              }
+              ## missing.price <- self$data$id[!self$data$id %in% prices$id]
+              ## if (length(missing.price) > 0) {
+              ##   errors <- paste0("The price must be provided for all ids.\n", "\tMissing IDs : ",
+              ##                    paste(missing.price, collapse = ", "))
+              ##   message(errors)
+              ## }
 
               # Reevaluate the portfolio
-              self$prices <- prices
+              self$data %<>% full_join(prices, by='id') %>%
+                mutate(price = ifelse(is.na(price.y), price.x, price.y)) %>%
+                select(-price.x, -price.y)
+
               private$calcWeights()
               invisible(self)
             },
@@ -149,40 +161,74 @@ Portfolio <-
               if (!all(c("id", "trade", "price") %in% names(trades))) {
                 stop(simpleError("Trades must contain the columns of 'id' and 'trade'."))
               }
-              old.prices <- self$prices[!self$prices$id %in% trades[!is.na(trades$price), ]$id, ]
+              old.prices <- self$data[!self$data$id %in% trades[!is.na(trades$price), ]$id, ] %>%
+                select(id, price)
               new.prices <- rbind(old.prices, trades[!is.na(trades$price), c('id', 'price')])
 
               if (amount) {
                 trades.shares <- merge(trades[c('id', 'trade')],
-                                       new.prices,
-                                       all.x = T)
+                                       new.prices, all.x = T, by='id')
                 trades.shares %<>% mutate(trade = round(trade / price))
                 trades <- trades.shares
               }
 
-              tmp <- merge(self$shares, trades[c('id', 'trade')], by='id', all=T)
-              tmp <- merge(tmp, new.prices, by='id', all=T)
-              tmp[is.na(tmp)] <- 0
-              tmp$shares <- tmp$shares + tmp$trade
-              self$shares <- tmp[tmp$shares != 0, c('id', 'shares')]
-              self$prices <- tmp[tmp$shares != 0, c('id', 'price')]
+              self$data %<>% select(id, shares, price) %>%
+                full_join(trades, by='id') %>%
+                mutate(price = ifelse(is.na(price.y), price.x, price.y)) %>%
+                select(-price.x, -price.y) %>%
+                mutate(shares = shares + trade) %>%
+                select(-trade)
               private$calcWeights()
               invisible(self)
+
+              ## tmp <- merge(self$shares, trades[c('id', 'trade')], by='id', all=T)
+              ## tmp <- merge(tmp, new.prices, by='id', all=T)
+              ## tmp[is.na(tmp)] <- 0
+              ## tmp$shares <- tmp$shares + tmp$trade
+              ## self$shares <- tmp[tmp$shares != 0, c('id', 'shares')]
+              ## self$prices <- tmp[tmp$shares != 0, c('id', 'price')]
+              ## private$calcWeights()
+              ## invisible(self)
             }),
           private = list(
             allow.fraction = F,
             calcWeights = function() {
-              tmp <- merge(self$shares, self$prices, by = 'id', all.x = TRUE)
-              tmp$mv <- tmp$shares * tmp$price
-              self$mv <- tmp[c('id', 'mv')]
-              self$nav <- sum(self$mv$mv)
-              tmp$weights <- tmp$mv / self$nav
-              tmp$weights.mpfr <- formatMpfr(mpfr(tmp$mv, 1024) / mpfr(self$nav, 1024))
-              self$weights <- tmp[c('id', 'weights')]
-              self$weights.mpfr <- tmp[c('id', 'weights.mpfr')]
-              colnames(self$weights.mpfr) <- c('id', 'weights')
+              if (all(c('shares', 'price') %in% names(self$data))) {
+                stopifnot(!any(is.na(self$data[c('id', 'shares', 'price')])))
+
+                self$data %<>%
+                  mutate(mv = shares * price,
+                         weight = format(mpfr(mv, 1024) / sum(mv))) %>%
+                  filter(shares > 0)
+
+              } else if (all(c('price', 'mv') %in% names(self$data))) {
+                stopifnot(!any(is.na(self$data[c('id', 'price', 'mv')])))
+
+                self$data %<>%
+                  mutate(shares = round(mv / price),
+                         weight = format(mpfr(mv, 1024) / sum(mv))) %>%
+                  filter(shares > 0)
+              }
             }
           ),
           active = list(
+            nav = function() {
+              return(sum(self$data$mv))
+            },
+            shares = function(d) {
+              if (missing(d)) {
+                return(self$data[c('id', 'shares')])
+              }
+            },
+            prices = function(d) {
+              if (missing(d)) {
+                return(self$data[c('id', 'price')])
+              }
+            },
+            mv = function(d) {
+              if (missing(d)) {
+                return(self$data[c('id', 'mv')])
+              }
+            }
           ),
           inherit = PortfolioAbstract)
